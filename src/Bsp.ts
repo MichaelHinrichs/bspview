@@ -4,22 +4,22 @@ import { parseString } from "./utils";
 import { Palette, QuakePalette } from "./Palette";
 
 const HEADER30 = [
+    "HEADER_LUMPS",
     "ENTITIES",
     "PLANES",
-    "TEXTURES",
     "VERTICES",
     "VISIBILITY",
     "NODES",
+    "TEXTURES",
     "TEXINFO",
     "FACES",
     "LIGHTING",
-    "CLIPNODES",
     "LEAVES",
-    "MARKSURFACES",
     "EDGES",
     "SURFEDGES",
     "MODELS",
-    "HEADER_LUMPS",
+    "CLIPNODES",
+    "MARKSURFACES",
 ];
 
 interface Header {
@@ -33,32 +33,12 @@ export interface Lump {
     size: number;
 }
 
-export interface Node {
-    plane: number;
-    front: number;
-    back: number;
-    bbox: [Vector3, Vector3];
-    face: number; // First face
-    faces: number; // Number of faces
-}
-
-export interface Leaf {
-    type: number;
-    vislist: number;
-    bbox: [Vector3, Vector3];
-    face: number;
-    faces: number;
-    ambient: number[];
-}
-
-export interface Face {
-    plane: number;
-    side: number;
-    firstEdge: number;
-    edges: number;
-    styles: number;
-    textureInfo: number;
-    lightmapOffset: number;
+export interface Entity {
+    origin?: string;
+    classname?: string;
+    _light?: string;
+    style?: string;
+    angle?: number;
 }
 
 export interface Plane {
@@ -69,22 +49,13 @@ export interface Plane {
     type: number;
 }
 
-export interface Entity {
-    origin?: string;
-    classname?: string;
-    _light?: string;
-    style?: string;
-    angle?: number;
-}
-
-export interface Model {
-    min: number[];
-    max: number[];
-    origin: number[];
-    nodes: number[];
-    visLeafs: number;
-    firstFace: number;
-    faces: number;
+export interface Node {
+    plane: number;
+    front: number;
+    back: number;
+    bbox: [Vector3, Vector3];
+    face: number; // First face
+    faces: number; // Number of faces
 }
 
 export interface Texture {
@@ -109,29 +80,62 @@ export interface TexInfo {
     flags: number;
 }
 
+export interface Face {
+    plane: number;
+    side: number;
+    firstEdge: number;
+    edges: number;
+    styles: number;
+    textureInfo: number;
+    lightmapOffset: number;
+}
+
+export interface Leaf {
+    type: number;
+    vislist: number;
+    bbox: [Vector3, Vector3];
+    face: number;
+    faces: number;
+    ambient: number[];
+}
+
+export interface Model {
+    min: number[];
+    max: number[];
+    origin: number[];
+    nodes: number[];
+    visLeafs: number;
+    firstFace: number;
+    faces: number;
+}
+
 export class Bsp {
     header: Header;
-    nodes: Node[];
-    leaves: Leaf[];
-    visibility: number[];
-    vertices: Vector3[];
-    edges: number[][];
-    planes: Plane[];
-    faces: Face[];
-    surfEdges: number[];
     entities: Entity[];
-    texInfo: TexInfo[];
-    models: Model[];
+    planes: Plane[];
+    vertices: Vector3[];
+    visibility: number[];
+    nodes: Node[];
     textures: Texture[];
+    texInfo: TexInfo[];
+    faces: Face[];
     lighting: number[][];
+    leaves: Leaf[];
+    edges: number[][];
+    surfEdges: number[];
+    models: Model[];
 
     constructor(buffer: ArrayBuffer) {
         this.header = this.parseHeader(buffer);
         const lumps = this.header.lumps;
-        this.edges = this.extractLump(buffer, lumps["EDGES"], [
-            "Uint16",
-            "Uint16",
-        ]);
+
+        // Entities is a special case
+        const entityLump = lumps["ENTITIES"];
+        const entityString = Buffer.from(
+            buffer.slice(entityLump.offset, entityLump.offset + entityLump.size)
+        ).toString("ascii");
+        this.entities = this.parseEntities(entityString);
+        
         this.planes = this.extractLump(buffer, lumps["PLANES"], [
             "Float32",
             "Float32",
@@ -147,26 +151,6 @@ export class Bsp {
                 type: data[4],
             };
         });
-        this.surfEdges = this.extractLump(buffer, lumps["SURFEDGES"], [
-            "Int32",
-        ]);
-
-        // [TODO] This depends on BSP version (1b vs 3b)
-        this.lighting =
-            this.header.id === 30
-                ? this.extractLump(buffer, lumps["LIGHTING"], [
-                      "Uint8",
-                      "Uint8",
-                      "Uint8",
-                  ])
-                : this.extractLump(buffer, lumps["LIGHTING"], ["Uint8"]);
-
-        // Entities is a special case
-        const entityLump = lumps["ENTITIES"];
-        const entityString = Buffer.from(
-            buffer.slice(entityLump.offset, entityLump.offset + entityLump.size)
-        ).toString("ascii");
-        this.entities = this.parseEntities(entityString);
 
         this.vertices = this.extractLump(buffer, lumps["VERTICES"], [
             "Float32",
@@ -175,6 +159,11 @@ export class Bsp {
         ]).map((vertex) => {
             return new Vector3(vertex[0], vertex[1], vertex[2]);
         });
+
+        // Parse visplane
+        this.visibility = this.extractLump(buffer, lumps["VISIBILITY"], [
+            "Uint8",
+        ]);
 
         this.nodes = this.extractLump(buffer, lumps["NODES"], [
             "Uint32",
@@ -201,6 +190,69 @@ export class Bsp {
                 faces: data[10],
             };
         });
+
+        // Parse textures
+        this.texInfo = this.extractLump(buffer, lumps["TEXINFO"], [
+            "Float32",
+            "Float32",
+            "Float32",
+            "Float32",
+            "Float32",
+            "Float32",
+            "Float32",
+            "Float32",
+            "Uint32",
+            "Uint32",
+        ]).map((data) => {
+            return {
+                vs: new Vector3(data[0], data[1], data[2]),
+                sShift: data[3],
+                vt: new Vector3(data[4], data[5], data[6]),
+                tShift: data[7],
+                mipTex: data[8],
+                flags: data[9],
+            };
+        });
+
+        // Parse textures
+        const textureLump = lumps["TEXTURES"];
+        const textureView = new DataView(
+            buffer.slice(
+                textureLump.offset,
+                textureLump.offset + textureLump.size
+            )
+        );
+
+        // Parse faces
+        this.faces = this.extractLump(buffer, lumps["FACES"], [
+            "Uint16",
+            "Uint16",
+            "Uint32",
+            "Uint16",
+            "Uint16",
+            "Uint32",
+            "Uint32",
+        ]).map((data) => {
+            return {
+                plane: data[0],
+                side: data[1],
+                firstEdge: data[2],
+                edges: data[3],
+                textureInfo: data[4],
+                styles: data[5],
+                lightmapOffset: data[6],
+            };
+        });
+
+        // [TODO] This depends on BSP version (1b vs 3b)
+        this.lighting =
+            this.header.id === 30
+                ? this.extractLump(buffer, lumps["LIGHTING"], [
+                      "Uint8",
+                      "Uint8",
+                      "Uint8",
+                  ])
+                : this.extractLump(buffer, lumps["LIGHTING"], ["Uint8"]);
 
         this.leaves = this.extractLump(buffer, lumps["LEAVES"], [
             "Int32",
@@ -230,34 +282,15 @@ export class Bsp {
                 ambient: [data[10], data[11], data[12], data[13]],
             };
         });
-
-        // Parse visplane
-        this.visibility = this.extractLump(buffer, lumps["VISIBILITY"], [
-            "Uint8",
+        
+        this.edges = this.extractLump(buffer, lumps["EDGES"], [
+            "Uint16",
+            "Uint16",
         ]);
-
-        // Parse textures
-        this.texInfo = this.extractLump(buffer, lumps["TEXINFO"], [
-            "Float32",
-            "Float32",
-            "Float32",
-            "Float32",
-            "Float32",
-            "Float32",
-            "Float32",
-            "Float32",
-            "Uint32",
-            "Uint32",
-        ]).map((data) => {
-            return {
-                vs: new Vector3(data[0], data[1], data[2]),
-                sShift: data[3],
-                vt: new Vector3(data[4], data[5], data[6]),
-                tShift: data[7],
-                mipTex: data[8],
-                flags: data[9],
-            };
-        });
+        
+        this.surfEdges = this.extractLump(buffer, lumps["SURFEDGES"], [
+            "Int32",
+        ]);
 
         // Parse models
         this.models = this.extractLump(buffer, lumps["MODELS"], [
@@ -288,36 +321,6 @@ export class Bsp {
                 faces: data[15],
             };
         });
-
-        // Parse faces
-        this.faces = this.extractLump(buffer, lumps["FACES"], [
-            "Uint16",
-            "Uint16",
-            "Uint32",
-            "Uint16",
-            "Uint16",
-            "Uint32",
-            "Uint32",
-        ]).map((data) => {
-            return {
-                plane: data[0],
-                side: data[1],
-                firstEdge: data[2],
-                edges: data[3],
-                textureInfo: data[4],
-                styles: data[5],
-                lightmapOffset: data[6],
-            };
-        });
-
-        // Parse textures
-        const textureLump = lumps["TEXTURES"];
-        const textureView = new DataView(
-            buffer.slice(
-                textureLump.offset,
-                textureLump.offset + textureLump.size
-            )
-        );
 
         const numTextures = textureView.getUint32(0, true);
 
